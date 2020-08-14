@@ -1,0 +1,1272 @@
+---
+title: "R code for *The first 100 days of SARS-CoV-2 control in Vietnam*"
+author:
+  - Pham Quang Thai, Maia A Rabaa, Duong Huy Luong, Dang Quang Tan, Tran Dai Quang, Ha-Linh Quach, Ngoc-Anh Hoang Thi, Phung Cong Dinh, Ngu Duy Nghia, Tran Anh Tu, La Ngoc Quang, Tran My Phuc, Vinh Chau, Nguyen Cong Khanh, Dang Duc Anh, Tran Nhu Duong, Guy Thwaites, H Rogier van Doorn, Marc Choisy, OUCRU COVID-19 Research Group
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+  pdf_document:
+    toc: yes
+editor_options: 
+  chunk_output_type: console
+---
+
+```{css, echo=FALSE}
+pre, code {white-space:pre !important; overflow-x:auto}
+```
+
+```{r general options, include = FALSE}
+knitr::knit_hooks$set(
+  margin1 = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", plt = c(.105, .89, .13, .97)) # plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  margin2 = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", plt = c(.105, .97, .13, .97)) # plt = c(.105, .97, .13, .97))
+    else NULL
+  },
+  margin3 = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 1), bty = "n", plt = c(.1, .4, .13, .97))
+    else NULL
+  },
+  margin4 = function(before, options, envir) {
+    if (before) par(mgp = c(1.5, .5, 0), bty = "n", plt = c(.105, .97, .18, .95))
+    else NULL
+  },
+  prompt = function(before, options, envir) {
+    options(prompt = if (options$engine %in% c("sh", "bash")) "$ " else "> ")
+  })
+
+knitr::opts_chunk$set(margin1 = TRUE, message = FALSE, warning = FALSE,
+                      prompt = FALSE, comment = "##", collapse = FALSE,
+                      cache = FALSE, autodep = TRUE,
+                      dev.args = list(pointsize = 11), fig.height = 3.5,
+#                      fig.width = 4.24725,
+                      fig.width = 4.5,
+                      fig.retina = 2, fig.align = "center")
+
+options(width = 263)
+
+l <- "en_US.UTF-8"
+Sys.setenv(LANGAGE = l)
+Sys.setlocale(locale = l)
+Sys.setlocale("LC_MESSAGES", l)
+```
+
+## Packages
+
+The packages used in this analysis:
+
+```{r}
+library(fitdistrplus)
+library(incidence)
+library(EpiEstim)
+library(mvtnorm)
+library(plotrix)
+library(car)
+# packages from the tidyverse:
+library(lubridate)
+library(stringr)
+library(purrr)
+library(tidyr)
+library(magrittr) # after tidyr to overload extract()
+library(dplyr) # safer to load last
+```
+
+## Data sets
+
+The line listing of cases:
+
+```{r}
+ll <- readRDS("../clean data/line_listing0.rds") %>% 
+  mutate(positive = as_date(ifelse(result1, sample1,
+                                   ifelse(result2, sample2,
+                                          ifelse(result3, sample3,
+                                                 ifelse(result4, sample4,
+                                                        ifelse(result5, sample5,
+                                                               ifelse(result6, sample6,
+                                                                      ifelse(result7, sample7,
+                                                                             ifelse(result8, sample8,
+                                                                                    ifelse(result9, sample9,
+                                                                                           sample10)))))))))),
+         entry2onset = as.integer(date_of_onset - last_contact),
+         admin2disch = as.integer(date_of_discharge - date_of_admission),
+         admin2onset = as.integer(date_of_onset - date_of_admission))
+```
+
+Note that we've computed and added (i) the date of the first positive test, and
+the delays between (ii) entry in the country and date of onset, (iii) admission
+and dischage, (iv) admission and symptoms onset. The quaratine data and the
+RT-PCR tests data:
+
+```{r}
+quarantine <- readRDS("../clean data/quarantine.rds")
+tests <- readRDS("../clean data/tests.rds")
+```
+
+The population mobility data:
+
+```{r}
+download.file("https://www.dropbox.com/s/6fl62gcuma9890f/google.rds?raw=1", "google.rds")
+download.file("https://www.dropbox.com/s/uuxxjm3cgs0a4gw/apple.rds?raw=1", "apple.rds")
+google <- readRDS("google.rds")
+apple <- readRDS("apple.rds") %>% 
+  mutate_if(is.numeric, subtract, 100)
+```
+
+The raw data are available from
+[www.google.com/covid19/mobility](https://www.google.com/covid19/mobility) for
+the Google Community Mobility data and
+[www.apple.com/covid19/mobility](https://www.apple.com/covid19/mobility) for the
+Apple mobility data. The timing of all the lockdowns (second date is the first
+day after the lockdown):
+
+```{r}
+lockdowns <- list(
+  son_loi                = c(ymd(20200213), ymd(20200305)),
+  truch_bach             = c(ymd(20200306), ymd(20200321)),
+  phan_thiet__binh_thuan = c(ymd(20200313), ymd(20200404)),
+  van_lam_3              = c(ymd(20200317), ymd(20200415)),
+  thua_loi               = c(ymd(20200323), ymd(20200421)),
+  bach_mai               = c(ymd(20200328), ymd(20200412)),
+  me_linh                = c(ymd(20200407), ymd(20200507)),
+  dong_van               = c(ymd(20200422), ymd(20200424)))
+```
+
+* Son Loi commune (Vinh Phuc province): 13 Feb - 04 Mar
+* Truch back street (Hanoi): 06 Mar - 20 Mar
+* Phan Thiet and Binh Thuan streets (Hanoi): 13 Mar - 03 Apr
+* Van Lam 3 village (Phuoc Nam commune, Thuan Nam district, Ninh Thuan province): 17 Mar - 14 Apr
+* Thua Loi village (Ben Tre province): 23 Mar - 20 Apr
+* Bach Mai hospital (Hanoi): 28 Mar - 11 Apr
+* Ha Loi village (Me Linh distrit, Hanoi province): 07 Apr - 06 May
+* Dong Van district (Ha Giang province): 22 Apr - 23 Apr
+
+## Utilitary functions
+
+### Tuning some functions
+
+Histograms:
+
+```{r}
+hist2 <- function(...) hist(main = NA, yaxs = "i", ...)
+```
+
+Polygons:
+
+```{r}
+polygon2 <- function(...) polygon(border = NA, ...)
+```
+
+Plots:
+
+```{r}
+plot2 <- function(...) plot(xaxs = "i", yaxs = "i", ...)
+```
+
+Arrows:
+
+```{r}
+arrows2 <- function(...) arrows(length = .05, angle = 90, code = 3, ...)
+```
+
+
+### Background of figures
+
+The starting dates of each period:
+
+```{r}
+periods <- c(
+  hubei   = ymd(20200124),
+  march15 = ymd(20200315),
+  march21 = ymd(20200321),
+  april1  = ymd(20200401),
+  april23 = ymd(20200423),
+  may2    = ymd(20200502)
+)
+```
+
+The colors for the background:
+
+```{r}
+bg <- RColorBrewer::brewer.pal(length(periods) - 1, "YlOrBr")
+```
+
+Inverting the last two colors (in order to account for the after-lockdown period):
+
+```{r}
+l <- length(bg)
+bg <- c(bg[-c(l - 1, l)], bg[l], bg[l - 1])
+```
+
+The function that plots the background:
+
+```{r}
+plot_layout <- function(ylab = "reproductive number", ylim = c(0, 4), ...) {
+  plot2(ymd(20200301), 0, type = "n", xlab = NA, ylab = ylab,
+        xlim = c(ymd(20200101) - .5, ymd(20200501) + .5), ylim = ylim,  ...)
+
+  for(i in 1:(length(periods) - 1)) {
+    rect(periods[i] - .5, ylim[1], periods[i + 1] - .5, ylim[2], col = bg[i], border = NA)
+  }
+}
+```
+
+### Polygons of cumulated cases
+
+A fonction that makes the polygons of the cumulative numbers of local transmission:
+
+```{r}
+plgn <- function(df, xinf = ymd(20200502), ...) {
+  x <- rep(c(df[[1]], xinf), each = 2)
+  y <- c(0, rep(df[[2]], each = 2), 0)
+  polygon(c(x, x[1]), c(y, y[1]), ...)
+}
+```
+
+where `df` is a 2-column data frame, the first column being dates and the
+second one being number of cases.
+
+## Quarantine data
+
+```{r fig.width = 1.75 * 4.24725, fig.height = 1.75, margin = FALSE, margin4 = TRUE}
+col <- c("#e41a1c", "#377eb8", "#4daf4a")
+eps <- .25
+lwd <- 2
+col2 = adjustcolor("grey", .6)
+
+plot_layout("persons isolated (n)", c(0, 6.5e4))
+
+# Adding the lockdowns:
+if(FALSE) {
+  l <- length(lockdowns)
+  for(i in seq(1, l, 4))
+    rect(lockdowns[[i]][1], 23000, lockdowns[[i]][2], 28000, col = col2)
+  for(i in seq(2, l, 4))
+    rect(lockdowns[[i]][1], 16000, lockdowns[[i]][2], 21000, col = col2)
+  for(i in seq(3, l, 4))
+    rect(lockdowns[[i]][1],  9000, lockdowns[[i]][2], 14000, col = col2)
+  for(i in seq(4, l, 4))
+    rect(lockdowns[[i]][1],  2000, lockdowns[[i]][2],  7000, col = col2)
+}
+
+with(quarantine, {
+  lines(date, health_facilities, type = "s", lwd = lwd, col = col[1])
+  lines(date + eps, quarantine_center, type = "s", lwd = lwd, col = col[2])
+  lines(date - eps, home_hotel, type = "s", lwd = lwd, col = col[3])
+})
+
+legend("topleft", legend = c("health facilities (F1 with symptoms)",
+                             "quarantine centres (F1 + some F2)",
+                             "home and hotels (low-risk country visit)"),
+       col = col, lwd = lwd)
+
+box(bty = "o")
+```
+
+## Population mobility data
+
+```{r fig.width = 1.75 * 4.24725, fig.height = 1.2 * 1.75, margin = FALSE, margin4 = TRUE}
+col <- c("#e41a1c", "#377eb8", "#4daf4a", "#984ea3", "grey", "#ffff33", "black", "#f781bf")
+lwd <- 2
+x <- 18365.9
+y <- 70
+w <- 20
+
+plot_layout("arbitrary unit", c(-70, 70))
+abline(h = 0)
+rect(ymd(20200123), -70, ymd(20200130), 70, 15, col = "grey")
+for(i in 1:2) lines(apple$date, pull(apple, i + 1), lwd = lwd, col = col[i])
+for(i in 3:8) lines(google$date, pull(google, i - 1), lwd = lwd, col = col[i])
+legend("left", legend = c("c", "f", "r", "g", "p", "t", "w", "h"), col = col, lwd = lwd) #, box.lwd = 0)
+box(bty = "o")
+```
+
+An alternative option for the legend:
+
+```{r fig.width = 1.75 * 4.24725, fig.height = 1.2 * 1.75, margin = FALSE, margin4 = TRUE}
+plot_layout("arbitrary unit", c(-70, 70))
+abline(h = 0)
+rect(ymd(20200123), -70, ymd(20200130), 70, 15, col = "grey")
+for(i in 1:2) lines(apple$date, pull(apple, i + 1), lwd = lwd, col = col[i])
+for(i in 3:8) lines(google$date, pull(google, i - 1), lwd = lwd, col = col[i])
+
+legend("topright", legend = c("work", "home"), col = col[7:8], lwd = lwd, bty = "n")
+legend(x - w, y, legend = c("parks", "transit"), col = col[5:6], lwd = lwd, bty = "n")
+legend(x - 2 * w, y, legend = c("retail", "grocery"), col = col[3:4], lwd = lwd, bty = "n")
+legend(x - 3 * w, y, legend = c("car", "walk"), col = col[1:2], lwd = lwd, bty = "n")
+
+box(bty = "o")
+```
+
+## Hospitalization data
+
+The number of people in hospital, every day:
+
+```{r}
+in_hospital <- ll %>% 
+  select(date_of_admission, date_of_discharge) %>% 
+  mutate_at("date_of_discharge", replace_na, ymd(20200505)) %>% 
+  pivot_longer(everything(), values_to = "date") %>% 
+  arrange(date) %>% 
+  mutate(n = ifelse(name == "date_of_admission", 1, -1)) %>% 
+  group_by(date) %>% 
+  summarise(n = sum(n)) %>% 
+  mutate(n = cumsum(n))
+```
+
+Adding the last day where there was no case yet:
+
+```{r}
+in_hospital <- rbind(in_hospital[1, ], in_hospital)
+in_hospital[1, 2] <- 0
+```
+
+The plot:
+
+```{r fig.width = 1.75 * 4.24725, fig.height = 1.75, margin = FALSE, margin4 = TRUE}
+col <- c("#377eb8", "#4daf4a")
+lwd <- 2
+
+plot_layout("cases (n)", c(0, 200))
+with(in_hospital, lines(date - .5, n, type = "s", lwd = lwd, col = col[1]))
+
+par(new = TRUE)
+with(tests, plot2(date - .5, n, type = "s", ann = FALSE, axes = FALSE, lwd = lwd, col = col[2],
+                  xlim = c(ymd(20200101) - .5, ymd(20200501) + .5), ylim = c(0, 1.5e4)))
+axis(4)
+
+# mtext: tests (n)
+
+legend("topleft", legend = c("cases hospitalised", "tests performed"), col = col, lwd = lwd)
+box(bty = "o")
+```
+
+## Importations and incidence data
+
+### The total numbers of cases
+
+Imported:
+
+```{r}
+imported <- ll %>% 
+  filter(origin_of_infection == "imported") %>% 
+  group_by(quarantine == "at entry") %>% 
+  tally() %>% 
+  pull(n)
+```
+
+Locally-transmitted:
+
+```{r}
+local <- ll %>% 
+  filter(origin_of_infection != "imported") %>% 
+  group_by(origin_of_infection == "F1imported") %>% 
+  tally() %>% 
+  pull(n)
+```
+
+The colors:
+
+```{r}
+col <- c("gray93", "grey", "#3182bd", "#9ecae1")
+```
+
+The plot:
+
+```{r fig.width = .75, margin = FALSE, margin3 = TRUE}
+numbers <- c(local, imported)
+barplot(matrix(numbers, length(numbers)), col = col, axes = FALSE, xaxs = "i", yaxs = "i")
+axis(4)
+```
+
+### The timeline of cases
+
+Local transmission:
+
+```{r}
+local <- ll %>% 
+  filter(!is.na(positive), origin_of_infection != "imported") %>% 
+  group_by(positive, origin_of_infection) %>% 
+  tally() %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = origin_of_infection, values_from = n) %>% 
+  mutate_if(is.integer, replace_na, 0L) %>% 
+  mutate_if(is.integer, cumsum) %>% 
+  mutate(positive = positive - .5,
+         `domestic outbreak` = F1imported + `domestic outbreak`)
+```
+
+The plot:
+
+```{r fig.width = 1.75 * 4.24725, margin1 = FALSE, margin2 = TRUE}
+plot_layout("cases (n)", c(0, 110))
+
+plgn(local[, c("positive", "domestic outbreak")], col = col[1])
+plgn(local[, c("positive", "F1imported")], col = col[2])
+
+abline(v = periods[-c(1, length(periods))] - .5, col = bg[-1])
+
+# adding the imported cases:
+par(new = TRUE)
+ll %>% 
+  filter(origin_of_infection == "imported") %>% 
+  mutate(quarantine = ifelse(quarantine == "at entry", "isolation", "no isolation")) %>% 
+  group_by(last_contact, quarantine) %>% 
+  tally() %>% 
+  pivot_wider(names_from = quarantine, values_from = n) %>% 
+  left_join(data.frame(last_contact = seq(ymd(20200101), ymd(20200501), 1)), ., "last_contact") %>% 
+  mutate(`no isolation` = ifelse(is.na(`no isolation`) & !is.na(isolation), 0, `no isolation`)) %>% # this last step is needed for the superposition in the barplot that follows
+  select(-last_contact) %>% 
+  t() %>% 
+  barplot(col = col[3:4], space = 0, axes = FALSE, ylim = c(0, 110), xaxs = "i", ann = FALSE)
+
+# the legend:
+rect(0, 56, 52, 110, col = "white")
+#rect(0, 56, 57, 110, col = "white")
+
+l1 <- legend("topleft", legend = c("isolated at entry", "isolated after entry"),
+             fill = c(rev(col)), title = expression(bold(" Imported cases:")), title.adj = 0, bty = "n")
+
+l2 <- legend(l1$rect$left, with(l1$rect, top - h),
+             legend = c("direct secondary infections", "subsequent secondary infections"),
+             fill = c("grey", "gray93"), title = expression(bold(" Cumulative domestic transmissions:")),
+             title.adj = 0, bty = "n")
+
+# Grid to help positionning elements:
+if(FALSE) {
+  abline(v = seq(0, 300, 10))
+  abline(h = seq(0, 120, 10))
+}
+
+draw.circle2 <- function(...) draw.circle(radius = 1.5, col = "black", ...)
+text2 <- function(...) text(adj = .5, cex = .8, col = "white", font = 2, ...)
+
+x <- 30
+y <- 8
+draw.circle2(x, y)
+text2(x, y, "1")
+
+x <- 67.5
+y <- 18
+draw.circle2(x, y)
+text2(x, y, "2")
+
+x <- 77
+y <- 33
+draw.circle2(x, y)
+text2(x, y, "B")
+
+x <- 85
+y <- 60
+draw.circle2(x, y)
+text2(x, y, "H")
+
+x <- 85
+y <- 67
+draw.circle2(x, y)
+text2(x, y, "T")
+
+x <- 97
+y <- 100
+draw.circle2(x, y)
+text2(x, y, "M")
+
+box(bty = "o")
+```
+
+## Demographics
+
+The data:
+
+```{r}
+demographics <- ll %>% 
+  mutate(imported = origin_of_infection == "imported") %>% 
+  select(imported, gender, nationality, age)
+```
+
+Parameters of the plotting functions defined below:
+
+```{r}
+breaks <- seq(0, 90, 5)
+xlim <- c(0, 80)
+```
+
+A function that plots age distribution as a function of gender:
+
+```{r}
+plot_gender <- function(x) {
+  col <- c(adjustcolor("#fa9fb5", .8), "#9ecae1")
+  
+  x %>% 
+    pull(age) %>% 
+    hist2(breaks, col = col[1], xlim = xlim,
+         xlab = "age (years)", ylab = "cases (n)")
+  
+  x %>% 
+    filter(gender == "male") %>% 
+    pull(age) %>% 
+    hist(breaks, col = col[2], add = TRUE)
+  
+  legend("topright", legend = c("female", "male"), fill = col, bty = "n")
+}
+```
+
+Imported cases:
+
+```{r}
+demographics %>% 
+  filter(imported) %>% 
+  plot_gender()
+```
+
+Local transmissions:
+
+```{r}
+demographics %>% 
+  filter(!imported) %>% 
+  plot_gender()
+```
+
+A function that plots age distribution as a function of nationality:
+
+```{r}
+plot_nationality <- function(x) {
+  col <- c("#7fc97f", "#beaed4")
+  
+  x %>% 
+    pull(age) %>% 
+    hist2(breaks, col = col[1], xlim = xlim,
+         xlab = "age (years)", ylab = "cases (n)")
+  
+  x %>% 
+    filter(nationality == "foreigner") %>% 
+    pull(age) %>% 
+    hist(breaks, col = col[2], add = TRUE)
+  
+  legend("topright", legend = c("Vietnamese", "non-Vietnamese"), fill = col, bty = "n")
+}
+```
+
+Imported cases:
+
+```{r}
+demographics %>% 
+  filter(imported) %>% 
+  plot_nationality()
+```
+
+Local transmission:
+
+```{r}
+demographics %>% 
+  filter(!imported) %>% 
+  plot_nationality()
+```
+
+## Asymptomatic cases
+
+### Time from admission to symptoms onset
+
+The data:
+
+```{r}
+a2o <- ll %>%
+  filter(!is.na(date_of_onset)) %>% 
+  pull(admin2onset)
+```
+
+The number of patients who developed symptoms:
+
+```{r}
+length(a2o)
+```
+
+The number of patients who developped symptoms before and after admission
+respectively:
+
+```{r}
+table(a2o > 0)
+```
+
+Let's look at the distribution of these times:
+
+```{r}
+hist2(a2o, min(a2o):max(a2o), ylab = "number of patiens",
+      xlab = "number of days between admission and symptoms onset")
+abline(v = 0, col = 2, lwd = 2)
+```
+
+This shows that some people were admitted quite a long time after the onset of
+symtoms. It also shows that about 13.2% of the 38 patients who developped
+symptoms after admission do so after day 9. Thus, in order to identify those who
+will never develop symptoms, it’s safer to consider only those patients who have
+been discharged.
+
+### Proportion of asymptomatic
+
+Let's look at the proportion of asymptomatic as a function of age:
+
+```{r}
+probs <- seq(0, 1, .1) # defines the quantiles we want to use to split the data
+col <- 4
+
+ll %>% 
+  filter(!is.na(date_of_discharge)) %>% 
+  transmute(age          = age,
+            asymptomatic = is.na(date_of_onset)) %>% 
+  na.exclude() %>% 
+  mutate(age_cat = cut(age, quantile(age, probs), include.lowest = TRUE)) %>% 
+  group_by(age_cat) %>% 
+  summarise(x     = sum(asymptomatic),
+            n     = n(),
+            age   = mean(age)) %>% 
+  mutate(prop     = map2(x, n, prop.test),
+         estimate = map_dbl(prop, use_series, "estimate"),
+         confint  = map(prop, use_series, "conf.int"),
+         lwr      = map_dbl(confint, extract, 1),
+         upr      = map_dbl(confint, extract, 2),
+         age_cat  = str_remove_all(age_cat, "\\(|\\)|\\[|\\]")) %>%
+  separate(age_cat, c("age1", "age2"), ",") %>% 
+  with({
+    plot(age, estimate, xlim = c(0, 70), ylim = 0:1, col = col, pch = 19,
+         xlab = "age (years)", ylab = "proportion asymptomatic")
+    arrows2(age, lwr, age, upr, col = col)
+    abline(v = age2, lty = 3)
+  })
+
+rect(-10, .36, 80, .498, col = adjustcolor("black", .1), border = NA)
+
+abline(h = .428)
+
+box(bty = "o")
+```
+
+**Conclusion:** no clear trend. Let's look at a binomial model with Type-II
+analysis of deviance:
+
+```{r}
+ll %>% 
+  filter(!is.na(date_of_discharge)) %>% 
+  mutate(imported = origin_of_infection == "imported",
+         asymptomatic = is.na(date_of_onset)) %>% 
+  glm(asymptomatic ~ imported + gender + nationality + age, binomial, .) %>% 
+  Anova()
+```
+
+**Conclusion:** nothing explains the proportion of asymptomatic.
+
+### Time from country entry to symptoms onset
+
+```{r}
+col <- rev(c("#3182bd", "#9ecae1"))
+
+breaks <- -20:20
+
+imported <- filter(ll, origin_of_infection == "imported")
+
+imported %>%
+  pull(entry2onset) %>%
+  hist2(breaks, col = col[1], xlab = "interval from entry to symptom onset (days)",
+        ylab = "number of imported cases")
+
+imported %>% 
+  filter(quarantine != "at entry") %>% 
+  pull(entry2onset) %>%
+  hist(breaks, col = col[2], add = TRUE)
+
+abline(v = 0, col = 2, lwd = 2)
+
+legend("left",
+       legend = c(paste0("at entry (n = ",
+                           nrow(filter(imported, quarantine == "at entry", !is.na(entry2onset))),
+                         ")"),
+                  paste0("after entry (n = ",
+                           nrow(filter(imported, quarantine != "at entry", !is.na(entry2onset))),
+                         ")")),
+       fill = col, bty = "n")
+```
+
+### Distribution of hospitalization durations
+
+A gamma regression model with Type-II analysis of deviance:
+
+```{r}
+ll %>% 
+  filter(!is.na(admin2disch)) %>% 
+  mutate(imported     = origin_of_infection == "imported",
+         asymptomatic = is.na(date_of_onset)) %>%
+  glm(admin2disch ~ asymptomatic + age + imported + gender + nationality, Gamma, .) %>% 
+  Anova()
+```
+
+Addressing reviewer #3's comment:
+
+```{r}
+ll %>% 
+  filter(!is.na(admin2disch)) %>% 
+  mutate(imported     = origin_of_infection == "imported",
+         asymptomatic = is.na(date_of_onset)) %>%
+  filter(! asymptomatic) %>% 
+  glm(admin2disch ~ age, Gamma, .) %>% 
+  summary()
+```
+
+The following figure take a Gamma regression model `mod` as an input and returns
+a data frame of predictions with confidence interval:
+
+```{r}
+predictions <- function(mod, p = 0.05, xs = seq(0, 80, le = 500)) {
+  fact <- qnorm(1 - p / 2)
+  pred <- predict(mod, data.frame(age = xs), se.fit = TRUE)
+  fit <- pred$fit
+  se <- pred$se.fit
+  data.frame(lwr = 1 / (fit - fact * se),
+             fit = 1 / fit,
+             upr = 1 / (fit + fact * se))
+}
+```
+
+The data set:
+
+```{r}
+dataset <- ll %>% 
+  filter(!is.na(admin2disch)) %>% 
+  mutate(imported     = origin_of_infection == "imported",
+         asymptomatic = is.na(date_of_onset))
+```
+
+The following function computes the means with confidence interval, by age class,
+and assuming a Gamma distribution, where `df` is a data frame with at least 2
+columns: (i) `age` that contains age and (ii) `admin2disch` that contains the
+durations of hospitalization:
+
+```{r}
+gamma_means <- function(df, probs = seq(0, 1, .1)) {
+  df %>% 
+    mutate(age_cat = cut(age, quantile(age, probs), include.lowest = TRUE)) %>%
+    group_by(age_cat) %>% 
+    summarise(age   = mean(age),
+              model = list(c(admin2disch)) %>%
+                        map(~ data.frame(y = .x) %>% glm(y ~ 1, Gamma, .))) %>%
+    mutate(age_cat  = str_remove_all(age_cat, "\\(|\\)|\\[|\\]"),
+           coef     = map_dbl(model, coef),
+           ci       = map(model, confint)) %>%
+    separate(age_cat, c("age1", "age2"), ",") %>%
+    unnest(ci) %>% 
+    cbind(name = c("lwr", "upr")) %>% 
+    pivot_wider(values_from = ci) %>%
+    mutate_at(vars(coef, lwr, upr), ~ 1 / .x)
+}
+```
+
+The figure:
+
+```{r}
+xs <- seq(0, 80, le = 500)
+col <- c(2, 4)
+alpha <- .3
+lwd <- 2
+
+plot(NA, xlim = c(0, 80), ylim = c(10, 36), type = "n", xaxs = "i",
+     xlab = "age (years)", ylab = "duration of hospitalisation (days)")
+
+mod_asymptomatic <- dataset %>% 
+  filter(!asymptomatic) %>% 
+  glm(admin2disch ~ age, Gamma, .) %>% 
+  predictions() %>% 
+  with({
+    polygon2(c(xs, rev(xs)), c(lwr, rev(upr)), col = adjustcolor(col[1], alpha))
+    lines(xs, fit, col = col[1], lwd = lwd)
+  })
+
+mod_symptomatic <- dataset %>% 
+  filter(asymptomatic) %>% 
+  glm(admin2disch ~ age, Gamma, .) %>% 
+  predictions() %>% 
+  with({
+    polygon2(c(xs, rev(xs)), c(lwr, rev(upr)), col = adjustcolor(col[2], alpha))
+    lines(xs, fit, col = col[2], lwd = lwd)
+  })
+
+ll %>% 
+  filter(!is.na(date_of_onset)) %>% 
+  select(age, admin2disch) %>% 
+  na.exclude() %>% 
+  gamma_means() %>%  
+  with({
+    points(age, coef, col = col[1], pch = 19, type = "o")
+    arrows2(age, lwr, age, upr, col = col[1])
+  })
+
+ll %>% 
+  filter(is.na(date_of_onset)) %>% 
+  select(age, admin2disch) %>% 
+  na.exclude() %>% 
+  gamma_means() %>%  
+  with({
+    points(age, coef, col = col[2], pch = 19, type = "o")
+    arrows2(age, lwr, age, upr, col = col[2])
+  })
+
+legend("top",
+       legend = c(paste0("symptomatic (n = ",
+                         nrow(na.exclude(select(filter(ll, !is.na(date_of_onset)), age, admin2disch))),
+                         ")"),
+                  paste0("asymptomatic (n = ",
+                         nrow(na.exclude(select(filter(ll, is.na(date_of_onset)), age, admin2disch))),
+                         ")")),
+       col = col, lwd = 2, pch = 19, fill = adjustcolor(col, alpha), border = NA, bty = "n")
+```
+
+The data for the Monte Carlo simulations:
+
+```{r}
+hospital_duration <- ll %>% 
+  filter(!is.na(admin2disch)) %>% 
+  mutate(asymptomatic = is.na(date_of_onset)) %>% 
+  select(admin2disch, asymptomatic)
+```
+
+The parameters of the Monte Carlo simulations:
+
+```{r}
+nb <- 1e4
+xs <- seq(0, 40, le = 500)
+```
+
+The function belows generates the confidence interval of an estimated Gamma distribution:
+
+```{r}
+make_ci <- function(x, nb) {
+  rmvnorm(nb, x$estimate, vcov(x)) %>%
+    as.data.frame() %$%
+    map2_dfc(shape, rate, dgamma, x = xs) %>% 
+    t() %>% 
+    as.data.frame() %>% 
+    map_dfc(quantile, c(.025, .5, .975)) %>% 
+    t() %>% 
+    as.data.frame() %>% 
+    setNames(c("lwr", "med", "upr"))
+}
+```
+
+Let's generate the confidence intervals:
+
+```{r eval = FALSE}
+asympt_distr <- hospital_duration %>% 
+  filter(asymptomatic) %>% 
+  pull(admin2disch) %>% 
+  fitdist("gamma") %>% 
+  make_ci(nb)
+
+sympt_distr <- hospital_duration %>% 
+  filter(!asymptomatic) %>% 
+  pull(admin2disch) %>% 
+  fitdist("gamma") %>% 
+  make_ci(nb)
+```
+
+```{r eval = FALSE, include = FALSE}
+saveRDS(asympt_distr, "asympt_distr.rds")
+saveRDS(sympt_distr, "sympt_distr.rds")
+```
+
+```{r include = FALSE}
+asympt_distr <- readRDS("asympt_distr.rds")
+sympt_distr <- readRDS("sympt_distr.rds")
+```
+
+The figure:
+
+```{r}
+col <- 3:4
+xlim <- c(0, 40)
+lwd <- 2
+alpha1 <- .65
+alpha2 <- .4
+breaks <- seq(0, 40, .5) - .5
+xlab <- "number of days from admission to discharge"
+ylab <- "density of probability"
+
+hospital_duration %>% 
+  filter(!asymptomatic) %>% 
+  pull(admin2disch) %>% 
+  hist2(breaks, ylim = c(0, 12), xlim = xlim, freq  = TRUE, col = adjustcolor(col[1], alpha1),
+        xlab = xlab, ylab = "number of patients")
+
+hospital_duration %>% 
+  filter(asymptomatic) %>% 
+  mutate(admin2disch = admin2disch - .5) %>% 
+  pull(admin2disch) %>%
+  hist(breaks, add = TRUE, col = adjustcolor(col[2], alpha1))
+
+par(new = TRUE)
+xval <- c(xs, rev(xs))
+plot(NA, xlim = xlim, ylim = c(0, .09), axes = FALSE, ann = FALSE, yaxs = "i")
+with(sympt_distr, {
+  polygon2(xval, c(lwr, rev(upr)), col = adjustcolor(col[1], alpha2))
+  lines(xs, med, col = col[1], lwd = lwd)
+})
+with(asympt_distr, {
+  polygon2(xval, c(lwr, rev(upr)), col = adjustcolor(col[2], alpha2))
+  lines(xs, med, col = col[2], lwd = lwd)
+})
+axis(4)
+mtext(ylab, 4, 1.5)
+
+legend("topright",
+       legend = c(paste0("asymptomatic (n = ", nrow(filter(hospital_duration, asymptomatic)), ")"),
+                  paste0("symptomatic (n = ", nrow(filter(hospital_duration, !asymptomatic)), ")")),
+       fill = rev(col), bty = "n")
+```
+
+An alternative with only the distributions:
+
+```{r}
+plot(NA, xlim = xlim, ylim = c(0, .09), yaxs = "i", xlab = xlab, ylab = ylab)
+
+with(sympt_distr, {
+  polygon2(xval, c(lwr, rev(upr)), col = adjustcolor(col[1], alpha2))
+  lines(xs, med, col = col[1], lwd = lwd)
+})
+
+with(asympt_distr, {
+  polygon2(xval, c(lwr, rev(upr)), col = adjustcolor(col[2], alpha2))
+  lines(xs, med, col = col[2], lwd = lwd)
+})
+
+legend("topright",
+       legend = c(paste0("asymptomatic (n = ", nrow(filter(hospital_duration, asymptomatic)), ")"),
+                  paste0("symptomatic (n = ", nrow(filter(hospital_duration, !asymptomatic)), ")")),
+       fill = rev(col), bty = "n")
+```
+
+### Serial intervals
+
+```{r}   
+infectors <- ll %>% 
+  select(id, date_of_onset, contact_id) %>% 
+  filter(id %in% contact_id | !is.na(contact_id)) %>% 
+  mutate(contact_id = sub("\r\n", ", ", contact_id) %>%
+                        map(strsplit, split = ", ") %>%
+                        map(first),
+         nb = map_int(contact_id, length)) %>% 
+  unnest(contact_id) %>% 
+  mutate(infector = setNames(date_of_onset, id)[contact_id],
+         serial_interval = as.integer(date_of_onset - infector))
+```
+
+```{r include = FALSE, eval = FALSE}
+infectors <- ll %>% 
+  select(id, date_of_onset, contact_id) %>% 
+  filter(id %in% unlist(contact_id) | !is.na(contact_id)) %>% 
+  unnest(contact_id) %>% 
+  mutate(infector = setNames(date_of_onset, id)[contact_id],
+         serial_interval = as.integer(date_of_onset - infector))
+```
+
+The serial intervals data:
+
+```{r}
+si <- infectors %>% 
+  pull(serial_interval) %>% 
+  na.exclude() %>% 
+  as.integer() # because na.exclude() changes the class...
+```
+
+Fitting a normal distribution to the serial interval distribution:
+
+```{r}
+si_distr <- fitdist(si, dnorm)
+```
+
+Calculating the confidence interval of this distribution:
+
+```{r}
+xs <- seq(-15, 25, le = 500)
+```
+
+```{r eval = T}
+si_distr_ci <- rmvnorm(nb, si_distr$estimate, vcov(si_distr)) %>%
+  assign("par_val", ., 1) %>% # for later use when computing the prop of inf before symptoms
+  as.data.frame() %$%
+  map2_dfc(mean, sd, dnorm, x = xs) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  map_dfc(quantile, c(.025, .5, .975)) %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  setNames(c("lwr", "med", "upr"))
+```
+
+```{r include = FALSE, eval = FALSE}
+saveRDS(si_distr_ci, "si_distr_ci.rds")
+saveRDS(par_val, "par_val.rds")
+```
+
+```{r include = FALSE, eval = FALSE}
+si_distr_ci <- readRDS("si_distr_ci.rds")
+par_val <- readRDS("par_val.rds")
+```
+
+The figure:
+
+```{r}
+lwd <- 2
+col <- "#1f78b4"
+xlim <- c(-10, 20)
+
+hist2(si, n = 10, xlim = xlim, ylim = c(0, 7.01),
+#hist2(si, -15:18, xlim = xlim, ylim = c(0, 7.01),
+      xlab = "serial interval (days)", ylab = "number of pairs")
+
+abline(v = 0, col = "#e41a1c", lwd = 2)
+
+par(new = TRUE)
+
+plot(NA, xlim = xlim, ylim = c(0, .102), yaxs = "i", ann = FALSE, axes = FALSE)
+
+polygon2(c(xs, rev(xs)), c(si_distr_ci$lwr, rev(si_distr_ci$upr)), col = adjustcolor(col, .3))
+lines(xs, si_distr_ci$med, col = col, lwd = lwd)
+abline(v = si_distr$estimate["mean"], lwd = lwd)
+abline(v = confint(si_distr)["mean", ], lwd = lwd, lty = 3)
+
+axis(4)
+mtext("density of probability", 4, 1.5)
+```
+
+Let's estimate the proportion of infections made before the onset of symptoms:
+
+```{r}
+prop_as <- map2_dbl(par_val[, "mean"], par_val[, "sd"], pnorm, q = 0)
+quantile(prop_as, c(.025, .5, .975))
+```
+
+The estimates of the normal distribution fitted to the serial intervals distribution:
+
+```{r}
+si_distr$estimate
+confint(si_distr)
+```
+
+## Time-varying reproductive numbers
+
+The data for this section:
+
+```{r}
+repnb <- ll %>% 
+  mutate(date = as_date(ifelse(positive < date_of_onset, positive, date_of_onset))) %>% 
+  select(date, origin_of_infection) %>% 
+  na.exclude()
+```
+
+Note that for the date we use the earlier of the onset of symptoms and first
+positive test. Let's now use this data set to create 3 incidence data sets:
+
+```{r}
+steps12 <- repnb %>% 
+  mutate(origin_of_infection = recode(origin_of_infection, `domestic outbreak` = "local", F1imported = "local")) %$% 
+  incidence(date, groups = origin_of_infection)
+
+step1 <- repnb %>% 
+  filter(origin_of_infection != "domestic outbreak") %>% 
+  mutate(origin_of_infection = recode(origin_of_infection, F1imported = "local")) %$% 
+  incidence(date, groups = origin_of_infection)
+
+step2 <- repnb %>% 
+  filter(origin_of_infection != "imported") %>%
+  mutate(origin_of_infection = recode(origin_of_infection, `domestic outbreak` = "local", F1imported = "imported")) %$% 
+  incidence(date, groups = origin_of_infection)
+```
+
+Let's use the estimates on the serial intervals:
+
+```{r}
+parms <- c(si_distr$estimate,
+           as.vector(confint(si_distr)),
+           sqrt(diag(vcov(si_distr)))) %>% 
+  setNames(c("mean_si", "std_si", "min_mean_si", "min_std_si",
+             "max_mean_si", "max_std_si", "std_mean_si", "std_std_si")) %>% 
+  as.list()
+```
+
+Let's tune the `estimate_R()`function:
+
+```{r}
+estR <- function(...) estimate_R(..., method = "uncertain_si", config = make_config(parms))
+```
+
+```{r eval = T}
+Rsteps12 <- estR(steps12)
+Rstep1 <- estR(step1)
+Rstep2 <- estR(step2)
+```
+
+```{r include = FALSE, eval = FALSE}
+saveRDS(Rsteps12, "Rsteps12.rds")
+saveRDS(Rstep1, "Rstep1.rds")
+saveRDS(Rstep2, "Rstep2.rds")
+```
+
+```{r include = FALSE, eval = FALSE}
+Rsteps12 <- readRDS("Rsteps12.rds")
+Rstep1 <- readRDS("Rstep1.rds")
+Rstep2 <- readRDS("Rstep2.rds")
+```
+
+```{r}
+plotR <- function(x = Rsteps12, plot_first = TRUE) {
+  col <- "#3182bd"
+  alpha <- .25
+  lwd <- 2
+  end1 <- ymd("2020-02-11")
+  start2 <- ymd("2020-02-29")
+  
+  r_val <- x$R[, c("t_start", "Mean(R)", "Quantile.0.025(R)", "Quantile.0.975(R)")]
+  r_val["t_start"] <- as.data.frame(x$dates[r_val$t_start] + 2.5)
+  
+  sel1 <- r_val$t_start < end1 + 1
+  sel2 <- r_val$t_start > start2 - 1
+  
+  r_val$t_start <- r_val$t_start + .5 # to place it in the middle of the day.
+  
+  plot_layout("reproductive number", c(0, 3), yaxt = "n")
+
+  if (plot_first) {
+    with(r_val[sel1, ], {
+      polygon2(c(t_start, rev(t_start)), c(`Quantile.0.025(R)`, rev(`Quantile.0.975(R)`)),
+              col = adjustcolor(col, alpha))
+      lines(t_start, `Mean(R)`, lwd = lwd, col = col)
+    })
+  }
+  
+  with(r_val[sel2, ], {
+    polygon2(c(t_start, rev(t_start)), c(`Quantile.0.025(R)`, rev(`Quantile.0.975(R)`)),
+            col = adjustcolor(col, alpha))
+    lines(t_start, `Mean(R)`, lwd = lwd, col = col)
+  })
+  
+  abline(h = 1)
+  axis(2, 0:3)
+  box(bty = "o")
+}
+```
+
+```{r fig.width = 1.75 * 4.24725, fig.height = 1.75, margin = FALSE, margin4 = TRUE}
+plotR(Rsteps12)
+plotR(Rstep1)
+plotR(Rstep2, FALSE)
+```
+
+## Table 1
+
+As suggested by reviewer #3:
+
+```{r}
+ll413 <- readxl::read_excel("../raw data/Pos COVID-19 413 update.xlsx") %>% 
+  mutate(id = paste0("NB", as.numeric(str_remove(`Patients number`, "NB|BN"))),
+         date_of_discharge2 = as.Date(`date of discharge`)) %>% 
+  select(id, date_of_discharge2)
+```
+
+```{r}
+ll2 <- ll %>% 
+  left_join(ll413, "id") %>% 
+  mutate(date_of_discharge = if_else(date_of_discharge < date_of_discharge2 | is.na(date_of_discharge), date_of_discharge2, date_of_discharge),
+         admin2disch       = as.integer(date_of_discharge - date_of_admission)) %>% 
+  select(-date_of_discharge2)
+```
+
+```{r}
+ll %>% 
+  select(id, age, gender, nationality, date_of_onset, admin2disch, quarantine, origin_of_infection) %>%
+  mutate(G = ifelse(origin_of_infection == "imported", "G0", ifelse(origin_of_infection == "F1imported", "G1", "G2")),
+         symptoms = ! is.na(date_of_onset),
+         quarantine = ifelse(G == "G0", ifelse(quarantine == "at entry", "at entry", "after entry"), NA)) %>% 
+  select(-date_of_onset, -origin_of_infection) %>% 
+  group_by(symptoms) %>% 
+  summarise(tibble(n               = n(),
+                   age             = list(quantile(age, c(.5, .25, .75))),
+                   gender          = sum(gender == "female") / n,
+                   G               = list(table(G) / n),
+                   nationality     = sum(nationality == "Vietnam") / n,
+                   admin2disch     = list(quantile(admin2disch, c(.5, .25, .75), na.rm = TRUE)),
+                   quarantine      = sum(quarantine == "at entry", na.rm = TRUE) / n
+                   )) %>% 
+  unnest_wider(age) %>% 
+  unnest_wider(G) %>% 
+  unnest_wider(admin2disch, names_sep = "_")
+```
+
+```{r}
+dataset2 <- ll2 %>% 
+  filter(!is.na(admin2disch)) %>% 
+  mutate(imported     = origin_of_infection == "imported",
+         asymptomatic = is.na(date_of_onset))
+```
+
+```{r}
+xs <- seq(0, 80, le = 500)
+col <- c(2, 4)
+alpha <- .3
+lwd <- 2
+
+plot(NA, xlim = c(0, 80), ylim = c(10, 36), type = "n", xaxs = "i",
+     xlab = "age (years)", ylab = "duration of hospitalisation (days)")
+
+mod_asymptomatic <- dataset2 %>% 
+  filter(!asymptomatic) %>% 
+  glm(admin2disch ~ age, Gamma, .) %>% 
+  predictions() %>% 
+  with({
+    polygon2(c(xs, rev(xs)), c(lwr, rev(upr)), col = adjustcolor(col[1], alpha))
+    lines(xs, fit, col = col[1], lwd = lwd)
+  })
+
+mod_symptomatic <- dataset2 %>% 
+  filter(asymptomatic) %>% 
+  glm(admin2disch ~ age, Gamma, .) %>% 
+  predictions() %>% 
+  with({
+    polygon2(c(xs, rev(xs)), c(lwr, rev(upr)), col = adjustcolor(col[2], alpha))
+    lines(xs, fit, col = col[2], lwd = lwd)
+  })
+
+ll2 %>% 
+  filter(!is.na(date_of_onset)) %>% 
+  select(age, admin2disch) %>% 
+  na.exclude() %>% 
+  gamma_means() %>%  
+  with({
+    points(age, coef, col = col[1], pch = 19, type = "o")
+    arrows2(age, lwr, age, upr, col = col[1])
+  })
+
+ll2 %>% 
+  filter(is.na(date_of_onset)) %>% 
+  select(age, admin2disch) %>% 
+  na.exclude() %>% 
+  gamma_means() %>%  
+  with({
+    points(age, coef, col = col[2], pch = 19, type = "o")
+    arrows2(age, lwr, age, upr, col = col[2])
+  })
+
+legend("top",
+       legend = c(paste0("symptomatic (n = ",
+                         nrow(na.exclude(select(filter(ll, !is.na(date_of_onset)), age, admin2disch))),
+                         ")"),
+                  paste0("asymptomatic (n = ",
+                         nrow(na.exclude(select(filter(ll, is.na(date_of_onset)), age, admin2disch))),
+                         ")")),
+       col = col, lwd = 2, pch = 19, fill = adjustcolor(col, alpha), border = NA, bty = "n")
+```
+
+
+## Session information
+
+```{r session_info}
+sessionInfo()
+```
